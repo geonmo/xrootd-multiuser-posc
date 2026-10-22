@@ -131,6 +131,7 @@ long long ExpectedSize(XrdOucEnv &env)
 class OwnerIDs {
 public:
     explicit OwnerIDs(uid_t uid) {
+        if (static_cast<uid_t>(setfsuid(-1)) == uid) {m_ok = true; return;}  // already there
         struct passwd pwd, *res = nullptr;
         std::vector<char> buf(16384);
         if (getpwuid_r(uid, &pwd, buf.data(), buf.size(), &res) || !res) {return;}
@@ -190,11 +191,13 @@ public:
 private:
     int Publish();
     void Abandon();
+    bool AsOpener(std::unique_ptr<OwnerIDs> &ids);
     std::unique_ptr<XrdOssDF> m_df;
     PoscOss &m_oss;
     std::string m_path, m_tmp;
     bool m_excl{false};
     long long m_asize{-1};
+    uid_t m_open_uid{0};  // fsuid the file was opened with
 };
 
 class PoscOss : public XrdOssWrapper {
@@ -263,8 +266,20 @@ bool PoscOss::Config(const char *configfn)
     cfg.Attach(fd);
     int enable = -1;
     bool persist_auto = false;
+    // ofs.osslib entries in order, to check the stacking (see below).
+    std::vector<std::string> osslibs;
     const char *val;
     while ((val = cfg.GetMyFirstWord())) {
+        if (!strcmp(val, "ofs.osslib")) {
+            std::string line;
+            while ((val = cfg.GetWord())) {
+                if (!strcmp(val, "++") || val[0] == '-') {continue;}  // stacking marker, options
+                line = val;
+                break;
+            }
+            if (!line.empty()) {osslibs.push_back(line);}
+            continue;
+        }
         if (!strcmp(val, "multiuser.posc.enable")) {
             val = cfg.GetWord();
             if (val && !strcmp(val, "on")) {enable = 1;}
@@ -294,6 +309,33 @@ bool PoscOss::Config(const char *configfn)
     int retc = cfg.LastError();
     cfg.Close();
     if (retc) {m_log.Emsg("Config", -retc, "read config file", configfn); return false;}
+
+    // This plugin creates, renames and removes files with whatever IDs the
+    // calling thread has; only xrootd-multiuser stacked ABOVE it makes those
+    // the mapped user's.  Each "ofs.osslib ++" wraps the libraries listed
+    // before it, so a libXrdMultiuser line must follow ours.
+    auto base = [](const std::string &lib) {
+        std::string b = lib.substr(lib.rfind('/') + 1);
+        auto dot = b.find('.');
+        if (dot != std::string::npos) {b.resize(dot);}
+        auto dash = b.rfind('-');                // drop the "-5" version suffix
+        if (dash != std::string::npos && b.find_first_not_of("0123456789", dash + 1) == std::string::npos) {b.resize(dash);}
+        return b;
+    };
+    int self = -1, multiuser = -1;
+    for (size_t i = 0; i < osslibs.size(); i++) {
+        std::string b = base(osslibs[i]);
+        if (b == "libXrdMultiuserPosc") {self = static_cast<int>(i);}
+        else if (b == "libXrdMultiuser") {multiuser = static_cast<int>(i);}
+    }
+    if (multiuser < 0) {
+        m_log.Emsg("Config", "libXrdMultiuserPosc requires libXrdMultiuser; add \"ofs.osslib ++ libXrdMultiuser.so\" after it");
+        return false;
+    }
+    if (self >= 0 && multiuser < self) {
+        m_log.Emsg("Config", "libXrdMultiuser must be listed after libXrdMultiuserPosc (\"ofs.osslib ++\" wraps the libraries listed before it)");
+        return false;
+    }
 
     m_on = (enable >= 0) ? (enable == 1) : persist_auto;
     if (!m_on) {
@@ -578,9 +620,33 @@ PoscFile::~PoscFile()
     // Destroyed without a successful Close(): the wrapped file closes when
     // m_df goes; then drop the temporary file.
     if (!m_tmp.empty()) {
+        std::unique_ptr<OwnerIDs> ids;
+        AsOpener(ids);
         m_df.reset();
         Abandon();
     }
+}
+
+// Close, rename and remove must run with the IDs the file was opened with.
+// xrootd-multiuser >= 2.2.1-1.1.2 (KISTI site build) does that; older builds
+// and the stock OSG plugin run Close() with the daemon's IDs, which would make
+// every publish fail with EACCES in user-owned directories.  Switch here in
+// that case (the thread's CAP_SETUID was raised by multiuser at Open()).
+bool PoscFile::AsOpener(std::unique_ptr<OwnerIDs> &ids)
+{
+    if (static_cast<uid_t>(setfsuid(-1)) == m_open_uid) {return true;}
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        m_oss.Log().Emsg("Posc", "Close() is not running as the opening user (xrootd-multiuser older than "
+                         "2.2.1-1.1.2?); switching IDs here");
+    }
+    ids.reset(new OwnerIDs(m_open_uid));
+    if (!ids->ok()) {
+        m_oss.Log().Emsg("Posc", "Unable to switch to the opening user for", m_path.c_str());
+        return false;
+    }
+    return true;
 }
 
 int PoscFile::Open(const char *path, int Oflag, mode_t Mode, XrdOucEnv &env)
@@ -593,6 +659,7 @@ int PoscFile::Open(const char *path, int Oflag, mode_t Mode, XrdOucEnv &env)
         m_tmp = pending.tmp;
         m_excl = pending.exclusive;
         m_asize = ExpectedSize(env);
+        m_open_uid = static_cast<uid_t>(setfsuid(-1));
     }
     int rc = wrapDF.Open(m_tmp.empty() ? path : m_tmp.c_str(), Oflag, Mode, env);
     if (rc && !m_tmp.empty()) {Abandon();}
@@ -637,6 +704,8 @@ void PoscFile::Abandon()
 int PoscFile::Close(long long *retsz)
 {
     if (m_tmp.empty()) {return wrapDF.Close(retsz);}
+    std::unique_ptr<OwnerIDs> ids;
+    AsOpener(ids);
 
     // A transfer that stopped short of the announced size is incomplete even
     // if the close succeeds.  Without oss.asize (chunked PUT, xrdcp from a

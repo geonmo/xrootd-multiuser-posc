@@ -23,12 +23,17 @@ multiuser.posc.journal /var/spool/xrootd/posc-journal   # mode 1733, owned by th
 multiuser.posc.trace info                           # all|debug|info|none
 ```
 
-The server refuses to start if POSC is enabled and the journal directory is
+The server refuses to start if no `libXrdMultiuser` line follows this
+plugin's `ofs.osslib` line (missing, or listed in the wrong order), and if
+POSC is enabled and the journal directory is
 missing, not creatable, or not mode 1733 and owned by the daemon.  If a
 journal entry cannot be written at run time, that one file is written in
 place (without POSC) and an error is logged.
 
 Notes:
+* Close/rename/remove run with the IDs the file was opened with.  With an
+  xrootd-multiuser that closes as the daemon (stock OSG builds, KISTI builds
+  before 2.2.1-1.1.2) the plugin switches IDs itself and logs a warning once.
 * Uploads without `oss.asize` (chunked HTTP PUT, xrdcp from a pipe) are
   published on close as before; only a server stop is covered for them.
 * xroot third-party copies (`tpc.key`) are written in place.
