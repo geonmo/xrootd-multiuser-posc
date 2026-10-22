@@ -1,0 +1,7 @@
+{
+global:
+  XrdOssAddStorageSystem2;
+  XrdOssAddStorageSystem2_;
+local:
+  *;
+};
