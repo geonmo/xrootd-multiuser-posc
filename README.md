@@ -37,7 +37,11 @@ Notes:
 * Uploads without `oss.asize` (chunked HTTP PUT, xrdcp from a pipe) are
   published on close as before; only a server stop is covered for them.
 * xroot third-party copies (`tpc.key`) are written in place.
-* Checksum tools that crawl the namespace should skip `*.mu-part.*`.
+* While an upload is in flight its data lives in a hidden file named
+  `.<name>.mu-part.<16 hex>` in the same directory.  Anything that scans the
+  namespace (backups, accounting, external checksum or migration tools) will
+  see these files; they can be recognised by the `.mu-part.` marker, and their
+  content is incomplete until they are renamed.
 
 ## License
 

@@ -71,7 +71,7 @@
 
 namespace {
 
-const char kMarker[] = ".mu-part.";  // keep in sync with xrd_checksum's crawler
+const char kMarker[] = ".mu-part.";  // part of the on-disk format: external tools match on it
 
 namespace Trace {
 const int Debug = 0x01;
