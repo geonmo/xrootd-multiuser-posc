@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -58,6 +59,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <pwd.h>
 #include <signal.h>
 #include <sys/capability.h>
@@ -173,6 +175,101 @@ bool RaiseIDCaps()
     return ok;
 }
 
+/******************************************************************************/
+/*                     C l o s e   o n   S I G T E R M                        */
+/******************************************************************************/
+
+// xrootd installs no SIGTERM handler, so "systemctl stop/restart" kills the
+// process and the kernel closes every open file with the exiting thread's
+// IDs, i.e. the daemon's.  Shared file systems that check the closing user
+// (Lustre: "mdc close failed: rc = -13") then keep the open handle on the
+// server.  Instead, on SIGTERM a dedicated thread closes every file this
+// plugin has open with the IDs it was opened with, then lets the default
+// action terminate the process.
+
+const int kMaxFd = 1 << 17;  // above LimitNOFILE (65536) of the xrootd units
+
+struct FdOwner {
+    std::atomic<uint32_t> uid1{0};  // fsuid + 1; 0 = slot free
+    std::atomic<uint32_t> gid{0};
+};
+FdOwner *g_fds = nullptr;   // indexed by fd; allocated when enabled
+sem_t g_term_sem;
+XrdSysError *g_term_log = nullptr;
+
+void RegisterFd(int fd)
+{
+    if (!g_fds || fd < 0 || fd >= kMaxFd) {return;}
+    g_fds[fd].gid.store(static_cast<uint32_t>(setfsgid(-1)));
+    g_fds[fd].uid1.store(static_cast<uint32_t>(setfsuid(-1)) + 1);
+}
+
+void UnregisterFd(int fd)
+{
+    if (!g_fds || fd < 0 || fd >= kMaxFd) {return;}
+    g_fds[fd].uid1.store(0);
+}
+
+extern "C" void PoscOnTerm(int)
+{
+    // Only async-signal-safe work here: wake the closing thread.  A second
+    // SIGTERM while it runs terminates at once.
+    static volatile sig_atomic_t seen = 0;
+    if (seen) {signal(SIGTERM, SIG_DFL); raise(SIGTERM); return;}
+    seen = 1;
+    sem_post(&g_term_sem);
+}
+
+void *TermThread(void *)
+{
+    sigset_t all;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, nullptr);  // never take the signal here
+    bool caps = RaiseIDCaps();
+    while (sem_wait(&g_term_sem) && errno == EINTR) {}
+
+    const uid_t self_uid = geteuid();
+    const gid_t self_gid = getegid();
+    int closed = 0;
+    for (int fd = 0; fd < kMaxFd; fd++) {
+        uint32_t u = g_fds[fd].uid1.exchange(0);
+        if (!u) {continue;}
+        if (caps) {setfsgid(g_fds[fd].gid.load()); setfsuid(u - 1);}
+        close(fd);  // the last reference is dropped here, with these IDs
+        closed++;
+    }
+    setfsuid(self_uid);
+    setfsgid(self_gid);
+    if (g_term_log) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d file(s) closed as their owners", closed);
+        g_term_log->Emsg("Term", "SIGTERM:", buf, caps ? "; exiting" : "(no CAP_SETUID: closed as the daemon); exiting");
+    }
+    signal(SIGTERM, SIG_DFL);
+    kill(getpid(), SIGTERM);  // default action: terminate
+    return nullptr;
+}
+
+bool InstallCloseOnTerm(XrdSysError &log)
+{
+    g_fds = new FdOwner[kMaxFd];
+    if (sem_init(&g_term_sem, 0, 0)) {return false;}
+    g_term_log = &log;
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&tid, &attr, TermThread, nullptr);
+    pthread_attr_destroy(&attr);
+    if (rc) {return false;}
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = PoscOnTerm;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    return sigaction(SIGTERM, &sa, nullptr) == 0;
+}
+
 struct Pending {
     const XrdOucEnv *env{nullptr};  // Create() and the following Open() see the same object
     std::string path;               // final name
@@ -198,6 +295,7 @@ private:
     bool m_excl{false};
     long long m_asize{-1};
     uid_t m_open_uid{0};  // fsuid the file was opened with
+    int m_fd{-1};         // registered for close-on-SIGTERM
 };
 
 class PoscOss : public XrdOssWrapper {
@@ -208,7 +306,7 @@ public:
 
     XrdOssDF *newFile(const char *tident) override {
         XrdOssDF *df = m_wrapped.newFile(tident);
-        return (df && m_on) ? new PoscFile(df, *this) : df;
+        return (df && (m_on || g_fds)) ? new PoscFile(df, *this) : df;
     }
 
     int Create(const char *tid, const char *path, mode_t mode, XrdOucEnv &env, int opts = 0) override;
@@ -224,6 +322,7 @@ public:
     bool Finish(const std::string &path, const std::string &tmp);
     void JournalDel(const std::string &tmp);
     XrdOss &Base() {return m_wrapped;}
+    bool On() const {return m_on;}
     XrdSysError &Log() {return m_log;}
 
 private:
@@ -337,6 +436,23 @@ bool PoscOss::Config(const char *configfn)
         return false;
     }
 
+    // The cmsd loads the OSS too but never opens files for clients.
+    char comm[32] = {0};
+    if (FILE *f = fopen("/proc/self/comm", "r")) {
+        if (!fgets(comm, sizeof(comm), f)) {comm[0] = '\0';}
+        fclose(f);
+    }
+    const bool is_cmsd = !strncmp(comm, "cmsd", 4);
+
+    // Always: there is no reason to let the kernel close files as the daemon.
+    if (!is_cmsd) {
+        if (!InstallCloseOnTerm(m_log)) {
+            m_log.Emsg("Config", errno, "install the SIGTERM handler that closes files as their owners");
+            return false;
+        }
+        m_log.Emsg("Config", "On SIGTERM, open files are closed as their owners before exiting");
+    }
+
     m_on = (enable >= 0) ? (enable == 1) : persist_auto;
     if (!m_on) {
         m_log.Say("------ POSC emulation is off (multiuser.posc.enable / ofs.persist auto not set).");
@@ -364,13 +480,7 @@ bool PoscOss::Config(const char *configfn)
     }
     m_log.Emsg("Config", "POSC emulation (rename-on-close) enabled; journal", m_journal.c_str());
 
-    // The cmsd loads the OSS too but never writes files.
-    char comm[32] = {0};
-    if (FILE *f = fopen("/proc/self/comm", "r")) {
-        if (!fgets(comm, sizeof(comm), f)) {comm[0] = '\0';}
-        fclose(f);
-    }
-    if (strncmp(comm, "cmsd", 4)) {Recover();}
+    if (!is_cmsd) {Recover();}
     return true;
 }
 
@@ -617,13 +727,15 @@ void PoscOss::Recover()
 
 PoscFile::~PoscFile()
 {
-    // Destroyed without a successful Close(): the wrapped file closes when
-    // m_df goes; then drop the temporary file.
-    if (!m_tmp.empty()) {
+    // Destroyed without Close(): the wrapped file closes its descriptor when
+    // m_df goes, so do that with the IDs it was opened with (the caller may
+    // be running as the daemon), then drop any temporary file.
+    if (m_fd >= 0 || !m_tmp.empty()) {
+        UnregisterFd(m_fd);
         std::unique_ptr<OwnerIDs> ids;
         AsOpener(ids);
         m_df.reset();
-        Abandon();
+        if (!m_tmp.empty()) {Abandon();}
     }
 }
 
@@ -661,8 +773,13 @@ int PoscFile::Open(const char *path, int Oflag, mode_t Mode, XrdOucEnv &env)
         m_asize = ExpectedSize(env);
         m_open_uid = static_cast<uid_t>(setfsuid(-1));
     }
+    if (m_tmp.empty()) {m_open_uid = static_cast<uid_t>(setfsuid(-1));}
     int rc = wrapDF.Open(m_tmp.empty() ? path : m_tmp.c_str(), Oflag, Mode, env);
     if (rc && !m_tmp.empty()) {Abandon();}
+    if (rc == 0) {
+        m_fd = wrapDF.getFD();
+        RegisterFd(m_fd);
+    }
     return rc;
 }
 
@@ -703,7 +820,13 @@ void PoscFile::Abandon()
 
 int PoscFile::Close(long long *retsz)
 {
-    if (m_tmp.empty()) {return wrapDF.Close(retsz);}
+    UnregisterFd(m_fd);  // before the close: the number may be reused right after
+    m_fd = -1;
+    if (m_tmp.empty()) {
+        std::unique_ptr<OwnerIDs> ids;
+        AsOpener(ids);
+        return wrapDF.Close(retsz);
+    }
     std::unique_ptr<OwnerIDs> ids;
     AsOpener(ids);
 

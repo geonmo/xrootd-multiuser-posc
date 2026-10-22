@@ -1,5 +1,5 @@
 Name: xrootd-multiuser-posc
-Version: 0.1.0
+Version: 0.2.0
 Release: 1%{?dist}
 Summary: Persist-on-successful-close (rename-on-close) OSS plugin for xrootd-multiuser
 
@@ -47,5 +47,12 @@ install -d -m 1733 %{buildroot}%{_localstatedir}/spool/xrootd/posc-journal
 %dir %attr(1733,xrootd,xrootd) %{_localstatedir}/spool/xrootd/posc-journal
 
 %changelog
+* Thu Oct 22 2026 Geonmo Ryu <geonmo@kisti.re.kr> - 0.2.0-1
+- On SIGTERM, close every open file (uploads and reads) with the IDs it was
+  opened with before exiting, instead of letting the kernel close them as the
+  daemon (Lustre rejected those closes with -13)
+- Files destroyed without Close() are closed as the opening user too
+- Apache-2.0 license; README wording
+
 * Thu Oct 22 2026 Geonmo Ryu <geonmo@kisti.re.kr> - 0.1.0-1
 - Initial package: rename-on-close POSC emulation for xrootd-multiuser

@@ -30,6 +30,13 @@ missing, not creatable, or not mode 1733 and owned by the daemon.  If a
 journal entry cannot be written at run time, that one file is written in
 place (without POSC) and an error is logged.
 
+On SIGTERM (`systemctl stop/restart`) the plugin closes every file it has
+open, uploads and reads alike, with the IDs the file was opened with, and
+then lets the process terminate.  xrootd installs no SIGTERM handler; without
+this the kernel closes the files as the daemon at exit, which shared file
+systems that check the closing user can reject (Lustre logs
+`mdc close failed: rc = -13`), leaving open handles on the metadata server.
+
 Notes:
 * Close/rename/remove run with the IDs the file was opened with.  With an
   xrootd-multiuser that closes as the daemon (stock OSG builds, KISTI builds
