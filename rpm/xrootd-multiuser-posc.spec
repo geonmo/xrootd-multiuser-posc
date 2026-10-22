@@ -3,7 +3,7 @@ Version: 0.1.0
 Release: 1%{?dist}
 Summary: Persist-on-successful-close (rename-on-close) OSS plugin for xrootd-multiuser
 
-License: BSD
+License: Apache-2.0
 URL: https://github.com/geonmo/xrootd-multiuser-posc
 # git archive v%{version} --prefix=%{name}-%{version}/ | gzip -7 > ~/rpmbuild/SOURCES/%{name}-%{version}.tar.gz
 Source0: %{name}-%{version}.tar.gz
@@ -41,6 +41,7 @@ stop are cleaned up at the next startup from a journal.
 install -d -m 1733 %{buildroot}%{_localstatedir}/spool/xrootd/posc-journal
 
 %files
+%license LICENSE
 %doc README.md
 %{_libdir}/libXrdMultiuserPosc-5.so
 %dir %attr(1733,xrootd,xrootd) %{_localstatedir}/spool/xrootd/posc-journal

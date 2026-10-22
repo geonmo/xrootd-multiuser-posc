@@ -38,3 +38,8 @@ Notes:
   published on close as before; only a server stop is covered for them.
 * xroot third-party copies (`tpc.key`) are written in place.
 * Checksum tools that crawl the namespace should skip `*.mu-part.*`.
+
+## License
+
+Apache License 2.0 (see `LICENSE`), the same as xrootd-multiuser, from which
+the CMake modules and parts of the logic are taken.
