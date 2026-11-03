@@ -1,0 +1,62 @@
+name: EL9 build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  el9:
+    name: AlmaLinux 9 / XRootD ${{ matrix.xrootd }}
+    runs-on: ubuntu-latest
+    container: almalinux:9
+    strategy:
+      fail-fast: false
+      matrix:
+        # XRootD release tags to build against; add more to widen coverage.
+        xrootd: [v6.2.1]
+    env:
+      XROOTD_PREFIX: /opt/xrootd
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf install -y git gcc-c++ make cmake pkgconf-pkg-config diffutils zstd \
+            libcap-devel libuuid-devel openssl-devel zlib-devel \
+            krb5-devel libxml2-devel readline-devel
+
+      - uses: actions/checkout@v7
+
+      - name: Restore XRootD build
+        id: xrootd-cache
+        uses: actions/cache@v6
+        with:
+          path: /opt/xrootd
+          key: xrootd-${{ matrix.xrootd }}-alma9-${{ hashFiles('.github/ci/build-xrootd.sh') }}
+
+      - name: Build XRootD ${{ matrix.xrootd }}
+        if: steps.xrootd-cache.outputs.cache-hit != 'true'
+        run: .github/ci/build-xrootd.sh ${{ matrix.xrootd }} $XROOTD_PREFIX
+
+      # The POSC plugin refuses to start unless libXrdMultiuser is stacked
+      # below it, so the smoke test needs a multiuser build too.
+      - name: Check out xrootd-multiuser
+        uses: actions/checkout@v7
+        with:
+          repository: geonmo/xrootd-multiuser
+          ref: master
+          path: _multiuser
+
+      - name: Build xrootd-multiuser-posc
+        run: |
+          cmake -S . -B build -DXROOTD_DIR=$XROOTD_PREFIX -DCMAKE_PREFIX_PATH=$XROOTD_PREFIX
+          cmake --build build -j$(nproc)
+
+      - name: Build xrootd-multiuser
+        run: |
+          cmake -S _multiuser -B _multiuser/build -DXROOTD_DIR=$XROOTD_PREFIX -DCMAKE_PREFIX_PATH=$XROOTD_PREFIX
+          cmake --build _multiuser/build -j$(nproc)
+
+      - name: Smoke test (load in xrootd with multiuser, upload, download, checksum)
+        run: .github/ci/smoke-test.sh $XROOTD_PREFIX _multiuser/build/libXrdMultiuser-*.so build/libXrdMultiuserPosc-*.so
