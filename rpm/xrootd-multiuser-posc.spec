@@ -8,16 +8,17 @@ URL: https://github.com/geonmo/xrootd-multiuser-posc
 # git archive v%{version} --prefix=%{name}-%{version}/ | gzip -7 > ~/rpmbuild/SOURCES/%{name}-%{version}.tar.gz
 Source0: %{name}-%{version}.tar.gz
 
-%define xrootd_current_major 5
-%define xrootd_next_major 6
+# xrootd major to build against (5 or 6): rpmbuild --define 'xrootd_major 6'
+%{!?xrootd_major: %global xrootd_major 5}
+%global xrootd_next_major %{lua: print(tonumber(rpm.expand("%{xrootd_major}")) + 1)}
 
-BuildRequires: xrootd-server-devel >= 1:%{xrootd_current_major}
+BuildRequires: xrootd-server-devel >= 1:%{xrootd_major}
 BuildRequires: xrootd-server-devel <  1:%{xrootd_next_major}
 BuildRequires: cmake
 BuildRequires: gcc-c++
 BuildRequires: libcap-devel
 
-Requires: xrootd-server >= 1:%{xrootd_current_major}
+Requires: xrootd-server >= 1:%{xrootd_major}
 Requires: xrootd-server <  1:%{xrootd_next_major}.0.0-1
 # Close() and the other handle operations must run as the mapped user,
 # which xrootd-multiuser does from the KISTI-GSDC 2.2.1-1.1.2 site build on.
@@ -43,7 +44,7 @@ install -d -m 1733 %{buildroot}%{_localstatedir}/spool/xrootd/posc-journal
 %files
 %license LICENSE
 %doc README.md
-%{_libdir}/libXrdMultiuserPosc-5.so
+%{_libdir}/libXrdMultiuserPosc-%{xrootd_major}.so
 %dir %attr(1733,xrootd,xrootd) %{_localstatedir}/spool/xrootd/posc-journal
 
 %changelog

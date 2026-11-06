@@ -1,0 +1,52 @@
+# Build the RPM against xrootd 5 (5.9.7-1.2.osg25.el9 from OSG) and attach it to the GitHub release.
+#   - push to master: build only (check; the RPMs are kept as a workflow artifact)
+#   - push a tag v*: build that tag and attach the RPMs to its release
+#   - Actions > rpm-xrootd5 > Run workflow (tag=...): rebuild an existing tag and attach
+# The xrootd 5 and 6 builds run as separate workflows; their RPMs differ by %{dist}.
+# KISTI-GSDC installs the release assets with playbooks_ifarm R48.cms_xrdr_server.yml.
+name: rpm-xrootd5
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: existing tag to build and release
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # everything below runs in AlmaLinux 9 (EL9 gcc/glibc); ubuntu is only the container host
+    container: almalinux:9
+    env:
+      REF: ${{ inputs.tag || github.ref_name }}
+      SPEC: rpm/xrootd-multiuser-posc.spec
+      DIST: .osg25.el9
+      XROOTD_MAJOR: "5"
+      XROOTD_VERSION: 5.9.7-1.2.osg25.el9
+      XROOTD_REPOS: ""
+    steps:
+      - run: dnf -y -q install git
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      # the build script comes from the workflow's commit, so old tags without it can be built
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          sparse-checkout: rpm/ci-build.sh
+      - run: .ci/rpm/ci-build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms-xrootd5
+          path: dist/*.rpm
+      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.REF }}
+          files: dist/*.rpm
+          overwrite_files: true
