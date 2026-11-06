@@ -1,0 +1,41 @@
+# Build the RPM and attach it to the GitHub release of the tag.
+#   - pushing a tag v* builds that tag
+#   - Actions > rpm > Run workflow (tag=...) rebuilds an existing tag
+# KISTI-GSDC installs the release assets with playbooks_ifarm R48.cms_xrdr_server.yml.
+name: rpm
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: existing tag to build
+        required: true
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: almalinux:9
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      SPEC: rpm/xrootd-multiuser-posc.spec
+      DIST: .osg25.el9
+      XROOTD_VERSION: 5.9.7-1.2.osg25.el9
+    steps:
+      - run: dnf -y -q install git
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      # the build script comes from the workflow's commit, so old tags without it can be built
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .ci
+          sparse-checkout: rpm/ci-build.sh
+      - run: .ci/rpm/ci-build.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*.rpm
+          overwrite_files: true
