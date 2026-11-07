@@ -129,25 +129,29 @@ long long ExpectedSize(XrdOucEnv &env)
     return (errno == 0 && end != asize && *end == '\0' && val >= 0) ? val : -1;
 }
 
+// setfsuid/setfsgid with an invalid ID change nothing and return the current one.
+uid_t CurrentFsuid() {return static_cast<uid_t>(setfsuid(static_cast<uid_t>(-1)));}
+gid_t CurrentFsgid() {return static_cast<gid_t>(setfsgid(static_cast<gid_t>(-1)));}
+
 // Switch this thread's FS IDs to a file owner for startup cleanup.
 class OwnerIDs {
 public:
     explicit OwnerIDs(uid_t uid) {
-        if (static_cast<uid_t>(setfsuid(-1)) == uid) {m_ok = true; return;}  // already there
-        struct passwd pwd, *res = nullptr;
+        if (CurrentFsuid() == uid) {m_ok = true; return;}  // already there
+        passwd pwd, *res = nullptr;
         std::vector<char> buf(16384);
         if (getpwuid_r(uid, &pwd, buf.data(), buf.size(), &res) || !res) {return;}
         int ngroups = 64;
-        std::vector<gid_t> groups(ngroups);
+        std::vector<gid_t> groups(static_cast<size_t>(ngroups));
         if (getgrouplist(res->pw_name, res->pw_gid, groups.data(), &ngroups) < 0) {
-            groups.resize(ngroups);
+            groups.resize(static_cast<size_t>(ngroups));
             if (getgrouplist(res->pw_name, res->pw_gid, groups.data(), &ngroups) < 0) {return;}
         }
-        groups.resize(ngroups);
-        m_uid = setfsuid(uid);
-        m_gid = setfsgid(res->pw_gid);
+        groups.resize(static_cast<size_t>(ngroups));
+        m_uid = static_cast<uid_t>(setfsuid(uid));
+        m_gid = static_cast<gid_t>(setfsgid(res->pw_gid));
         syscall(SYS_setgroups, groups.size(), groups.data());
-        m_ok = (static_cast<uid_t>(setfsuid(-1)) == uid);
+        m_ok = (CurrentFsuid() == uid);
         m_switched = true;
     }
     ~OwnerIDs() {
@@ -200,8 +204,8 @@ XrdSysError *g_term_log = nullptr;
 void RegisterFd(int fd)
 {
     if (!g_fds || fd < 0 || fd >= kMaxFd) {return;}
-    g_fds[fd].gid.store(static_cast<uint32_t>(setfsgid(-1)));
-    g_fds[fd].uid1.store(static_cast<uint32_t>(setfsuid(-1)) + 1);
+    g_fds[fd].gid.store(CurrentFsgid());
+    g_fds[fd].uid1.store(CurrentFsuid() + 1);
 }
 
 void UnregisterFd(int fd)
@@ -210,7 +214,8 @@ void UnregisterFd(int fd)
     g_fds[fd].uid1.store(0);
 }
 
-extern "C" void PoscOnTerm(int)
+extern "C" {
+static void PoscOnTerm(int)
 {
     // Only async-signal-safe work here: wake the closing thread.  A second
     // SIGTERM while it runs terminates at once.
@@ -218,6 +223,7 @@ extern "C" void PoscOnTerm(int)
     if (seen) {signal(SIGTERM, SIG_DFL); raise(SIGTERM); return;}
     seen = 1;
     sem_post(&g_term_sem);
+}
 }
 
 void *TermThread(void *)
@@ -282,9 +288,9 @@ class PoscOss;
 class PoscFile : public XrdOssWrapDF {
 public:
     PoscFile(XrdOssDF *df, PoscOss &oss) : XrdOssWrapDF(*df), m_df(df), m_oss(oss) {}
-    virtual ~PoscFile();
+    ~PoscFile() override;
     int Open(const char *path, int Oflag, mode_t Mode, XrdOucEnv &env) override;
-    int Close(long long *retsz = 0) override;
+    int Close(long long *retsz = nullptr) override;
 private:
     int Publish();
     void Abandon();
@@ -311,7 +317,7 @@ public:
 
     int Create(const char *tid, const char *path, mode_t mode, XrdOucEnv &env, int opts = 0) override;
 
-    int Unlink(const char *path, int Opts = 0, XrdOucEnv *envP = 0) override {
+    int Unlink(const char *path, int Opts = 0, XrdOucEnv *envP = nullptr) override {
         int rc = m_wrapped.Unlink(path, Opts, envP);
         if (rc == 0 && envP && m_on) {Cancel(path);}
         return rc;
@@ -322,7 +328,6 @@ public:
     bool Finish(const std::string &path, const std::string &tmp);
     void JournalDel(const std::string &tmp);
     XrdOss &Base() {return m_wrapped;}
-    bool On() const {return m_on;}
     XrdSysError &Log() {return m_log;}
 
 private:
@@ -624,7 +629,7 @@ bool PoscOss::JournalAdd(const std::string &tmp)
         return false;
     }
     std::ostringstream ss;
-    ss << static_cast<uid_t>(setfsuid(-1)) << " " << getpid() << "\n" << pfn << "\n";
+    ss << CurrentFsuid() << " " << getpid() << "\n" << pfn << "\n";
     std::string data = ss.str();
     bool ok = write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size());
     if (close(fd)) {ok = false;}
@@ -652,7 +657,7 @@ void PoscOss::Recover()
     if (!dir) {return;}
     bool caps = RaiseIDCaps();
     int removed = 0, failed = 0, skipped = 0;
-    while (struct dirent *ent = readdir(dir)) {
+    while (dirent *ent = readdir(dir)) {
         if (ent->d_name[0] == '.') {continue;}
         std::string entry = m_journal + "/" + ent->d_name;
         // Entries are 0600 and owned by the user that wrote them (others
@@ -671,9 +676,9 @@ void PoscOss::Recover()
             std::string data;
             int fd = (caps && ids.ok()) ? open(entry.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
             if (fd >= 0) {
-                data.resize(est.st_size);
+                data.resize(static_cast<size_t>(est.st_size));
                 ssize_t n = read(fd, &data[0], data.size());
-                data.resize(n < 0 ? 0 : n);
+                data.resize(n < 0 ? 0 : static_cast<size_t>(n));
                 close(fd);
             }
             std::istringstream in(data);
@@ -746,7 +751,7 @@ PoscFile::~PoscFile()
 // that case (the thread's CAP_SETUID was raised by multiuser at Open()).
 bool PoscFile::AsOpener(std::unique_ptr<OwnerIDs> &ids)
 {
-    if (static_cast<uid_t>(setfsuid(-1)) == m_open_uid) {return true;}
+    if (CurrentFsuid() == m_open_uid) {return true;}
     static bool warned = false;
     if (!warned) {
         warned = true;
@@ -771,9 +776,9 @@ int PoscFile::Open(const char *path, int Oflag, mode_t Mode, XrdOucEnv &env)
         m_tmp = pending.tmp;
         m_excl = pending.exclusive;
         m_asize = ExpectedSize(env);
-        m_open_uid = static_cast<uid_t>(setfsuid(-1));
+        m_open_uid = CurrentFsuid();
     }
-    if (m_tmp.empty()) {m_open_uid = static_cast<uid_t>(setfsuid(-1));}
+    if (m_tmp.empty()) {m_open_uid = CurrentFsuid();}
     int rc = wrapDF.Open(m_tmp.empty() ? path : m_tmp.c_str(), Oflag, Mode, env);
     if (rc && !m_tmp.empty()) {Abandon();}
     if (rc == 0) {
@@ -873,7 +878,10 @@ int PoscFile::Close(long long *retsz)
 extern "C" {
 
 XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
-                                const char *config_fn, const char *parms, XrdOucEnv *envP)
+                                const char *config_fn, const char *parms, XrdOucEnv *envP);
+
+XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
+                                const char *config_fn, const char * /*parms*/, XrdOucEnv * /*envP*/)
 {
     XrdSysError log(logger, "mposc_");
     if (!curr_oss) {
@@ -890,4 +898,5 @@ XrdOss *XrdOssAddStorageSystem2(XrdOss *curr_oss, XrdSysLogger *logger,
 
 }
 
+XrdVERSIONINFOREF(XrdOssAddStorageSystem2);
 XrdVERSIONINFO(XrdOssAddStorageSystem2, XrdMultiuserPosc);
