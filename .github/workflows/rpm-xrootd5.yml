@@ -1,4 +1,4 @@
-# Build the RPM against xrootd 5 (5.9.7-1.2.osg25.el9 from OSG) and attach it to the GitHub release.
+# Build the RPM against the newest xrootd 5 in OSG 25 main (repository osg) and attach it to the GitHub release.
 #   - push to master: build only (check; the RPMs are kept as a workflow artifact)
 #   - push a tag v*: build that tag and attach the RPMs to its release
 #   - Actions > rpm-xrootd5 > Run workflow (tag=...): rebuild an existing tag and attach
@@ -26,7 +26,7 @@ jobs:
       SPEC: rpm/xrootd-multiuser-posc.spec
       DIST: .osg25.el9
       XROOTD_MAJOR: "5"
-      XROOTD_VERSION: 5.9.7-1.2.osg25.el9
+      XROOTD_RELEASE_REPO: osg
       XROOTD_REPOS: ""
     steps:
       - run: dnf -y -q install git

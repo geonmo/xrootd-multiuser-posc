@@ -3,14 +3,15 @@
 #   SPEC            spec file path relative to the repository root
 #   DIST            %{dist} value, e.g. .osg25.el9
 #   XROOTD_MAJOR    5 or 6 (passed to the spec as xrootd_major: dependency range, plugin suffix)
-#   XROOTD_VERSION  xrootd devel packages to build against (epoch 1), e.g. 5.9.7-1.2.osg25.el9
-#   XROOTD_REPOS    extra OSG repositories to enable, e.g. osg-upcoming-development (optional)
+#   XROOTD_RELEASE_REPO  OSG release repository to take xrootd from: osg (25-main) for xrootd 5,
+#                        osg-upcoming (25-upcoming) for xrootd 6; the newest XROOTD_MAJOR.x
+#                        there is used
+#   XROOTD_VERSION  build against this xrootd instead (epoch 1), e.g. 5.9.7-1.2.osg25.el9 (optional)
+#   XROOTD_REPOS    extra OSG repositories to enable, e.g. osg-upcoming (optional)
 #   OUT             directory to copy the built RPMs into (default: dist/)
-# KISTI-GSDC runs xrootd 5.9.7-1.2.1 (OSG 1.2 + a .cc-only patch, same headers), so the
-# xrootd 5 build uses the OSG 1.2 devel packages.
 # Usage: rpm/ci-build.sh   (run from the repository root, checkout of the commit to build)
 set -euo pipefail
-: "${SPEC:?}" "${DIST:?}" "${XROOTD_MAJOR:?}" "${XROOTD_VERSION:?}"
+: "${SPEC:?}" "${DIST:?}" "${XROOTD_MAJOR:?}"
 OUT=${OUT:-dist}
 enable=()
 for r in ${XROOTD_REPOS:-}; do enable+=(--enablerepo="$r"); done
@@ -18,6 +19,18 @@ for r in ${XROOTD_REPOS:-}; do enable+=(--enablerepo="$r"); done
 dnf -y -q install epel-release dnf-plugins-core
 dnf config-manager --set-enabled crb
 dnf -y -q install https://repo.opensciencegrid.org/osg/25-main/osg-25-main-el9-release-latest.rpm
+
+# newest released xrootd of this major, unless a version was given
+if [ -z "${XROOTD_VERSION:-}" ]; then
+  : "${XROOTD_RELEASE_REPO:?set XROOTD_RELEASE_REPO or XROOTD_VERSION}"
+  XROOTD_VERSION=$(dnf -q "${enable[@]}" --repo="$XROOTD_RELEASE_REPO" repoquery --latest-limit 1 \
+                     --qf '%{version}-%{release}' "xrootd-server-devel-${XROOTD_MAJOR}.*" | tail -1)
+  if [ -z "$XROOTD_VERSION" ]; then
+    echo "no xrootd ${XROOTD_MAJOR}.x in ${XROOTD_RELEASE_REPO}" >&2
+    exit 1
+  fi
+  echo "using xrootd ${XROOTD_VERSION}, the newest ${XROOTD_MAJOR}.x in ${XROOTD_RELEASE_REPO}"
+fi
 if ! dnf -y -q "${enable[@]}" install git rpm-build rpmdevtools gzip \
   "xrootd-devel-1:${XROOTD_VERSION}" "xrootd-server-devel-1:${XROOTD_VERSION}" \
   "xrootd-private-devel-1:${XROOTD_VERSION}" "xrootd-server-libs-1:${XROOTD_VERSION}"; then

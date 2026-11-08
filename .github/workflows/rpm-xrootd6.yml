@@ -1,4 +1,4 @@
-# Build the RPM against xrootd 6 (6.2.0-1.1.osg25up.el9 from OSG) and attach it to the GitHub release.
+# Build the RPM against the newest xrootd 6 in OSG 25 upcoming (repository osg-upcoming) and attach it to the GitHub release.
 #   - push to master: build only (check; the RPMs are kept as a workflow artifact)
 #   - push a tag v*: build that tag and attach the RPMs to its release
 #   - Actions > rpm-xrootd6 > Run workflow (tag=...): rebuild an existing tag and attach
@@ -26,8 +26,8 @@ jobs:
       SPEC: rpm/xrootd-multiuser-posc.spec
       DIST: .osg25up.el9
       XROOTD_MAJOR: "6"
-      XROOTD_VERSION: 6.2.0-1.1.osg25up.el9
-      XROOTD_REPOS: "osg-upcoming osg-upcoming-testing osg-upcoming-development"
+      XROOTD_RELEASE_REPO: osg-upcoming
+      XROOTD_REPOS: "osg-upcoming"
     steps:
       - run: dnf -y -q install git
       - uses: actions/checkout@v4
