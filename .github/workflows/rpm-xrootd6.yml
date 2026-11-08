@@ -27,7 +27,7 @@ jobs:
       DIST: .osg25up.el9
       XROOTD_MAJOR: "6"
       XROOTD_VERSION: 6.2.1-1.1.osg25up.el9
-      XROOTD_REPOS: "osg-upcoming osg-upcoming-development"
+      XROOTD_REPOS: "osg-upcoming osg-upcoming-testing osg-upcoming-development"
     steps:
       - run: dnf -y -q install git
       - uses: actions/checkout@v4

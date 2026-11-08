@@ -18,9 +18,16 @@ for r in ${XROOTD_REPOS:-}; do enable+=(--enablerepo="$r"); done
 dnf -y -q install epel-release dnf-plugins-core
 dnf config-manager --set-enabled crb
 dnf -y -q install https://repo.opensciencegrid.org/osg/25-main/osg-25-main-el9-release-latest.rpm
-dnf -y -q "${enable[@]}" install git rpm-build rpmdevtools gzip \
+if ! dnf -y -q "${enable[@]}" install git rpm-build rpmdevtools gzip \
   "xrootd-devel-1:${XROOTD_VERSION}" "xrootd-server-devel-1:${XROOTD_VERSION}" \
-  "xrootd-private-devel-1:${XROOTD_VERSION}" "xrootd-server-libs-1:${XROOTD_VERSION}"
+  "xrootd-private-devel-1:${XROOTD_VERSION}" "xrootd-server-libs-1:${XROOTD_VERSION}"; then
+  # OSG moves builds between repositories (development -> testing -> release); show
+  # where xrootd is now so XROOTD_VERSION / XROOTD_REPOS can be fixed
+  echo "xrootd ${XROOTD_VERSION} not found with repos: ${XROOTD_REPOS:-<default>}" >&2
+  dnf -q --enablerepo='osg*' --showduplicates repoquery --qf '%{repoid} %{name}-%{epoch}:%{version}-%{release}' \
+    xrootd-server-devel >&2 || true
+  exit 1
+fi
 git config --global --add safe.directory "$PWD"
 
 defs=(--define "dist $DIST" --define "xrootd_major $XROOTD_MAJOR")
