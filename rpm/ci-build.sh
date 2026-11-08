@@ -24,7 +24,8 @@ if ! dnf -y -q "${enable[@]}" install git rpm-build rpmdevtools gzip \
   # OSG moves builds between repositories (development -> testing -> release); show
   # where xrootd is now so XROOTD_VERSION / XROOTD_REPOS can be fixed
   echo "xrootd ${XROOTD_VERSION} not found with repos: ${XROOTD_REPOS:-<default>}" >&2
-  dnf -q --enablerepo='osg*' --showduplicates repoquery --qf '%{repoid} %{name}-%{epoch}:%{version}-%{release}' \
+  dnf -q --enablerepo='osg*' --disablerepo='*minefield*' --setopt='*.skip_if_unavailable=1' \
+    --showduplicates repoquery --qf '%{repoid} %{name}-%{epoch}:%{version}-%{release}' \
     xrootd-server-devel >&2 || true
   exit 1
 fi
